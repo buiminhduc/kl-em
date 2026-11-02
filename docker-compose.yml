@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kl-em-postgres
+    environment:
+      POSTGRES_USER: scheduler
+      # Override with POSTGRES_PASSWORD=... in the shell or .env. Postgres applies it only when the
+      # pgdata volume is first created; after a change, recreate it with `docker compose down -v`.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scheduler}
+      POSTGRES_DB: scheduler
+    ports:
+      # Host 5433, not 5432: a local Postgres often already owns 5432.
+      # Bound to 127.0.0.1 so the database is reachable from this machine only, not from the LAN.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scheduler -d scheduler"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build: .
+    container_name: kl-em-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Same password variable and default as the postgres service above.
+      DATABASE_URL: postgres://scheduler:${POSTGRES_PASSWORD:-scheduler}@postgres:5432/scheduler
+      PORT: "3000"
+      LOG_LEVEL: info
+      # NODE_ENV=production (set in the Dockerfile) turns Swagger off by default. It is switched on
+      # here because this compose file is the local demo; a real production deployment would leave it off.
+      SWAGGER_ENABLED: "true"
+    ports:
+      # Host 3200, not 3100: 3100 is the default for `npm run start:dev`, so the containerised app and a
+      # local dev server can run side by side against the same database.
+      # Bound to 127.0.0.1: local-only, like the database.
+      - "127.0.0.1:3200:3000"
+    healthcheck:
+      # busybox wget ships with node:alpine; /health runs SELECT 1 against Postgres.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # One-shot: loads the Northbridge sample world, then exits 0. Starts only after the app is healthy,
+  # i.e. after the app has applied the migrations on startup. The app never depends on it.
+  # Idempotent (INSERT … ON CONFLICT DO NOTHING on fixed ids), so every `up` can safely rerun it.
+  seed:
+    build: .
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://scheduler:${POSTGRES_PASSWORD:-scheduler}@postgres:5432/scheduler
+    command: ["node", "dist/db/seed.js"]
+    restart: "no"
+
+volumes:
+  pgdata:
